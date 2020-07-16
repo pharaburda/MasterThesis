@@ -7,97 +7,163 @@ Original file is located at
     https://colab.research.google.com/drive/1e0E9Rrl_q4rMr7K5SuHBueH99Q46al4b
 """
 
-!pip install dask
-
-!pip install graphviz
-
-!pip install toolz
-
 import torch
 import torchvision.models as models
-from torch import nn
+from torch import nn, optim
 import math
-
-#https://pytorch.org/tutorials/intermediate/model_parallel_tutorial.html
-
-class Synergic(nn.Module):
-    __constants__ = ['in_features', 'out_features']
-
-    def __init__(self, in_features, out_features, bias=True):
-        super(Synergic, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
-        if bias:
-            self.bias = nn.Parameter(torch.Tensor(out_features))
-        else:
-            self.register_parameter('bias', None)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in)
-            nn.init.uniform_(self.bias, -bound, bound)
-
-    def forward(self, input):
-        return nn.functional.linear(input.to('cuda:0'), self.weight, self.bias)
-
-    def extra_repr(self):
-        return 'in_features={}, out_features={}, bias={}'.format(
-            self.in_features, self.out_features, self.bias is not None
-        )
-
-def initialize_model(num_classes, use_pretrained=True):
-    torch.manual_seed(10)
-    first_component = models.resnet50(pretrained=use_pretrained).to('cuda:0')
-    second_component = models.resnet50(pretrained=use_pretrained).to('cpu')
-
-    num_ftrs = first_component.fc.in_features
-    synergic_layer = Synergic(num_ftrs, num_classes)
-
-    first_component.fc = synergic_layer.to('cuda:0')
-    second_component.fc = synergic_layer.to('cuda:0')
-
-    return first_component, second_component, synergic_layer
-
-first_component, second_component, synergic_layer = initialize_model(5)
-
-torch.cuda.device_count()
-
 from torchvision import datasets
 from torchvision.transforms import transforms
 import os
-input_size = 224
+from torchvision.utils import save_image
+import torch.utils.data
+import torch.nn.functional as F
 
-data_dir = '/content/drive/My Drive/Glaucoma'
+device = 'cuda:0'
 
+class SynergicNet(nn.Module):
+    def __init__(self):
+      super(SynergicNet, self).__init__()
+      self.conv1 = nn.Conv1d(1, 32, 1)
+      self.conv2 = nn.Conv1d(32, 64, 1)
+      self.fc1 = nn.Linear(131072, 128)
+      self.fc2 = nn.Linear(128, 2)
+
+    def forward(self, x, y):
+      x = torch.cat((x, y), 1).unsqueeze(1)
+      #print(x.size())
+      x = self.conv1(x)
+      x = F.relu(x)
+
+      x = self.conv2(x)
+      x = F.relu(x)
+
+      x = F.max_pool1d(x, 2)
+      x = torch.flatten(x, 1)
+      x = self.fc1(x)
+      x = F.relu(x)
+      x = self.fc2(x)
+
+      #output = F.log_softmax(x, dim=1)
+      output = F.softmax(x, dim=1)
+      return output
+
+
+def initialize_model(use_pretrained=True):
+    torch.manual_seed(10)
+    first_component = models.resnet50(pretrained=use_pretrained).to(device)
+    second_component = models.resnet50(pretrained=use_pretrained).to(device)
+
+    first_component.fc = nn.Identity()
+    second_component.fc = nn.Identity()
+
+    synergicNet = SynergicNet().to(device)
+    return first_component, second_component, synergicNet
+
+def train_model(component1, component2, synergicNet, dataloaders_1, dataloaders_2, optimizer, criterion, num_epochs=10):
+    #since = time.time()
+
+    #val_acc_history = []
+
+    #best_model_wts_1 = copy.deepcopy(component1.state_dict())
+    #best_model_wts_2 = copy.deepcopy(component2.state_dict())
+    #best_acc = 0.0
+
+    for epoch in range(num_epochs):
+        print('Epoch {}/{}'.format(epoch, num_epochs - 1))
+        print('-' * 10)
+
+        for phase in ['train', 'val']:
+            if phase == 'train':
+                component1.train()
+                component2.train()
+            else:
+                component1.eval()
+                component2.eval()
+
+            for inputs1, labels1 in dataloaders_1[phase]:
+                inputs1 = inputs1.to(device)
+                labels1 = labels1.to(device)
+
+                outputs1 = component1(inputs1).to(device) 
+
+                for inputs2, labels2 in dataloaders_2[phase]:
+                    inputs2 = inputs2.to(device)
+                    labels2 = labels2.to(device)
+
+                    optimizer.zero_grad()
+
+                    outputs2 = component2(inputs2)
+                    #outputs1 = outputs1.to(device)
+                    outputs2 = outputs2.to(device)
+                    output = synergicNet(outputs1, outputs2)
+
+                    with torch.set_grad_enabled(phase == 'train'):
+                        label = 1 if labels1==labels2 else 0
+                        label = torch.LongTensor([label]).to(device)
+                        print(output)
+                        print(label)
+                        loss = criterion(output, label)
+                        _, preds = torch.max(output, 1)
+
+                        if phase == 'train':
+                            loss.backward()
+                            optimizer.step()
+
+torch.autograd.set_detect_anomaly(True)
+
+data_dir = '/content/drive/My Drive/magisterka_test'
+input_size = (224, 224)
 transform = transforms.Compose([
         transforms.Resize(input_size),
-        transforms.CenterCrop(input_size),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transforms.ToTensor()
     ])
 
-image_dataset_1 = datasets.ImageFolder(os.path.join(data_dir, 'train1'), transform)
+image_dataset = {x: datasets.ImageFolder(os.path.join(data_dir, x), transform) for x in ['train', 'val']}
+dataset_len = {x: len(image_dataset[x]) for x in ['train', 'val']}
+half_len = {x: int(len(image_dataset[x]) /2) for x in ['train', 'val']}
 
-train_dataset_1 = torch.utils.data.DataLoader(
-        image_dataset_1, shuffle=False, num_workers=16
-    )
+subset_1 = {}
+subset_2 = {}
+for x in ['train', 'val']:
+  s_1, s_2 = torch.utils.data.random_split(image_dataset[x], [half_len[x], half_len[x]])
+  subset_1[x] = s_1
+  subset_2[x] = s_2
 
-for data, target in train_dataset_1:
-  out = first_component(data.to('cuda:0'))
+image_loader_1 = {x: torch.utils.data.DataLoader(subset_1[x], shuffle=True, num_workers=4) for x in ['train', 'val']}
+image_loader_2 = {x: torch.utils.data.DataLoader(subset_2[x], shuffle=True, num_workers=4) for x in ['train', 'val']}
 
 
-image_dataset_2 = datasets.ImageFolder(os.path.join(data_dir, 'train2'), transform)
+first_component, second_component, synergicNet = initialize_model()
 
-image_dataset_2 = torch.utils.data.DataLoader(
-        image_dataset_1, shuffle=False, num_workers=16
-    )
+params_to_update = []
+for param in first_component.parameters():
+  params_to_update.append(param)
+for param in second_component.parameters():
+  params_to_update.append(param)
+for param in synergicNet.parameters():
+  params_to_update.append(param)
 
-for data, target in image_dataset_2:
-  out = second_component(data.to('cpu'))
+optimizer = optim.SGD(params_to_update, lr=0.001, momentum=0.9)
+
+criterion = nn.CrossEntropyLoss()
+
+train_model(first_component, second_component, synergicNet, image_loader_1, image_loader_2, optimizer, criterion)
+
+# for data1, target1 in image_loader_1:
+#   out_1 = first_component(data1.to('cuda:0'))
+#   for data2, target2 in image_loader_2:
+#     out_2 = second_component(data2.to('cuda:0'))
+#     synergic_net = SynergicNet().to('cuda:0')
+#     out = synergic_net(out_1.to('cuda:0'), out_2.to('cuda:0'))
+    #print(out)
+
+subset_1[0]
+
+out_1
+
+out_2
+
+target
 
 import os
 glaucoma_dir = '/content/drive/My Drive/magisterka/glaucoma/train'
@@ -112,63 +178,22 @@ amd_dir = '/content/drive/My Drive/magisterka/amd/train'
 amd_len= len([name for name in os.listdir(amd_dir) if os.path.isfile(os.path.join(amd_dir, name))])
 print(amd_len)
 
-from graphviz import Digraph
-import torch
-from torch.autograd import Variable
+import os
+from getpass import getpass
+import urllib
 
-def make_dot(var, params=None):
-    """ Produces Graphviz representation of PyTorch autograd graph
-    Blue nodes are the Variables that require grad, orange are Tensors
-    saved for backward in torch.autograd.Function
-    Args:
-        var: output Variable
-        params: dict of (name, Variable) to add names to node that
-            require grad (TODO: make optional)
-    """
-    if params is not None:
-        assert isinstance(params.values()[0], Variable)
-        param_map = {id(v): k for k, v in params.items()}
+user = input('User name: ')
+password = getpass('Password: ')
+password = urllib.parse.quote(password) # your password is converted into url format
+repo_name = input('Repo name: ')
 
-    node_attr = dict(style='filled',
-                     shape='box',
-                     align='left',
-                     fontsize='12',
-                     ranksep='0.1',
-                     height='0.2')
-    dot = Digraph(node_attr=node_attr, graph_attr=dict(size="12,12"))
-    seen = set()
+cmd_string = 'git clone https://{0}:{1}@github.com/{0}/{2}.git'.format(user, password, repo_name)
 
-    def size_to_str(size):
-        return '('+(', ').join(['%d' % v for v in size])+')'
+os.system(cmd_string)
+cmd_string, password = "", "" # removing the password from the variable
 
-    def add_nodes(var):
-        if var not in seen:
-            if torch.is_tensor(var):
-                dot.node(str(id(var)), size_to_str(var.size()), fillcolor='orange')
-            elif hasattr(var, 'variable'):
-                u = var.variable
-                name = param_map[id(u)] if params is not None else ''
-                node_name = '%s\n %s' % (name, size_to_str(u.size()))
-                dot.node(str(id(var)), node_name, fillcolor='lightblue')
-            else:
-                dot.node(str(id(var)), str(type(var).__name__))
-            seen.add(var)
-            if hasattr(var, 'next_functions'):
-                for u in var.next_functions:
-                    if u[0] is not None:
-                        dot.edge(str(id(u[0])), str(id(var)))
-                        add_nodes(u[0])
-            if hasattr(var, 'saved_tensors'):
-                for t in var.saved_tensors:
-                    dot.edge(str(id(t)), str(id(var)))
-                    add_nodes(t)
-    add_nodes(var.grad_fn)
-    return dot
+!git status
 
-import torch
-from torch.autograd import Variable
+!git clone git@github.com:pharaburda/MasterThesis.git
 
-x = Variable(torch.randn(1,3,224,2048))
-y = second_component(x)
-g = make_dot(y)
-g.view()
+!cd MasterThesis;ls;git status

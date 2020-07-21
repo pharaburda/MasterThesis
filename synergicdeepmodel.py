@@ -25,25 +25,14 @@ class SynergicNet(nn.Module):
       super(SynergicNet, self).__init__()
       self.conv1 = nn.Conv1d(1, 32, 1)
       self.conv2 = nn.Conv1d(32, 64, 1)
-      self.fc1 = nn.Linear(131072, 128)
+      self.fc1 = nn.Linear(4096, 128)
       self.fc2 = nn.Linear(128, 2)
 
-    def forward(self, x, y):
-      x = torch.cat((x, y), 1).unsqueeze(1)
-      #print(x.size())
-      x = self.conv1(x)
-      x = F.relu(x)
-
-      x = self.conv2(x)
-      x = F.relu(x)
-
-      x = F.max_pool1d(x, 2)
+    def forward(self, first, second):
+      x = torch.cat((first, second), 1).unsqueeze(1)
       x = torch.flatten(x, 1)
       x = self.fc1(x)
-      x = F.relu(x)
       x = self.fc2(x)
-
-      #output = F.log_softmax(x, dim=1)
       output = F.softmax(x, dim=1)
       return output
 
@@ -59,14 +48,7 @@ def initialize_model(use_pretrained=True):
     synergicNet = SynergicNet().to(device)
     return first_component, second_component, synergicNet
 
-def train_model(component1, component2, synergicNet, dataloaders_1, dataloaders_2, optimizer, criterion, num_epochs=10):
-    #since = time.time()
-
-    #val_acc_history = []
-
-    #best_model_wts_1 = copy.deepcopy(component1.state_dict())
-    #best_model_wts_2 = copy.deepcopy(component2.state_dict())
-    #best_acc = 0.0
+def train_model(num_epochs=10):
 
     for epoch in range(num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
@@ -74,40 +56,50 @@ def train_model(component1, component2, synergicNet, dataloaders_1, dataloaders_
 
         for phase in ['train', 'val']:
             if phase == 'train':
-                component1.train()
-                component2.train()
+                first_component.train()
+                second_component.train()
+                synergicNet.train()
+                
             else:
-                component1.eval()
-                component2.eval()
+                first_component.eval()
+                second_component.eval()
+                synergicNet.eval()
 
-            for inputs1, labels1 in dataloaders_1[phase]:
+            for inputs1, labels1 in imageloader_1[phase]:
                 inputs1 = inputs1.to(device)
                 labels1 = labels1.to(device)
-
-                outputs1 = component1(inputs1).to(device) 
-
-                for inputs2, labels2 in dataloaders_2[phase]:
+                for inputs2, labels2 in imageloader_2[phase]:
                     inputs2 = inputs2.to(device)
                     labels2 = labels2.to(device)
 
-                    optimizer.zero_grad()
-
-                    outputs2 = component2(inputs2)
-                    #outputs1 = outputs1.to(device)
-                    outputs2 = outputs2.to(device)
-                    output = synergicNet(outputs1, outputs2)
-
                     with torch.set_grad_enabled(phase == 'train'):
-                        label = 1 if labels1==labels2 else 0
-                        label = torch.LongTensor([label]).to(device)
-                        print(output)
-                        print(label)
-                        loss = criterion(output, label)
-                        _, preds = torch.max(output, 1)
+                      optimizer1.zero_grad()
+                      outputs1 = first_component(inputs1).to(device)
+                      loss1 = criterion(outputs1, labels1)
 
+                      if phase == 'train':
+                          loss1.backward(retain_graph=True)
+                          optimizer1.step()
+                      
+                      optimizer2.zero_grad()
+                      outputs2 = second_component(inputs2).to(device)
+                      loss2 = criterion(outputs2, labels2)
+
+                      if phase == 'train':
+                          loss2.backward(retain_graph=True)
+                          optimizer2.step()
+
+                    out_1 = first_component(inputs1).to(device)
+                    out_2 = second_component(inputs2).to(device)
+                    optimizerS.zero_grad()
+                    output = synergicNet(out_1, out_2)
+                    label = 1 if labels1==labels2 else 0
+                    label = torch.LongTensor([label]).to(device)
+                    with torch.set_grad_enabled(phase == 'train'):
+                        lossS = criterion(output, label)
                         if phase == 'train':
-                            loss.backward()
-                            optimizer.step()
+                            lossS.backward()
+                            optimizerS.step()
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -129,9 +121,8 @@ for x in ['train', 'val']:
   subset_1[x] = s_1
   subset_2[x] = s_2
 
-image_loader_1 = {x: torch.utils.data.DataLoader(subset_1[x], shuffle=True, num_workers=4) for x in ['train', 'val']}
-image_loader_2 = {x: torch.utils.data.DataLoader(subset_2[x], shuffle=True, num_workers=4) for x in ['train', 'val']}
-
+imageloader_1 = {x: torch.utils.data.DataLoader(subset_1[x], shuffle=True, num_workers=4) for x in ['train', 'val']}
+imageloader_2 = {x: torch.utils.data.DataLoader(subset_2[x], shuffle=True, num_workers=4) for x in ['train', 'val']}
 
 first_component, second_component, synergicNet = initialize_model()
 
@@ -143,27 +134,74 @@ for param in second_component.parameters():
 for param in synergicNet.parameters():
   params_to_update.append(param)
 
-optimizer = optim.SGD(params_to_update, lr=0.001, momentum=0.9)
+optimizer1 = optim.SGD(first_component.parameters(), lr=0.001, momentum=0.9)
+optimizer2 = optim.SGD(second_component.parameters(), lr=0.001, momentum=0.9)
+optimizerS = optim.SGD(params_to_update, lr=0.001, momentum=0.9)
 
 criterion = nn.CrossEntropyLoss()
 
-train_model(first_component, second_component, synergicNet, image_loader_1, image_loader_2, optimizer, criterion)
+output = train_model()
 
-# for data1, target1 in image_loader_1:
-#   out_1 = first_component(data1.to('cuda:0'))
-#   for data2, target2 in image_loader_2:
-#     out_2 = second_component(data2.to('cuda:0'))
-#     synergic_net = SynergicNet().to('cuda:0')
-#     out = synergic_net(out_1.to('cuda:0'), out_2.to('cuda:0'))
-    #print(out)
+!pip install dask
 
-subset_1[0]
+!pip install graphviz
 
-out_1
+!pip install toolz
 
-out_2
+from graphviz import Digraph
+import torch
+from torch.autograd import Variable
 
-target
+def make_dot(var, params=None):
+    """ Produces Graphviz representation of PyTorch autograd graph
+    Blue nodes are the Variables that require grad, orange are Tensors
+    saved for backward in torch.autograd.Function
+    Args:
+        var: output Variable
+        params: dict of (name, Variable) to add names to node that
+            require grad (TODO: make optional)
+    """
+    if params is not None:
+        assert isinstance(params.values()[0], Variable)
+        param_map = {id(v): k for k, v in params.items()}
+
+    node_attr = dict(style='filled',
+                     shape='box',
+                     align='left',
+                     fontsize='12',
+                     ranksep='0.1',
+                     height='0.2')
+    dot = Digraph(node_attr=node_attr, graph_attr=dict(size="12,12"))
+    seen = set()
+
+    def size_to_str(size):
+        return '('+(', ').join(['%d' % v for v in size])+')'
+
+    def add_nodes(var):
+        if var not in seen:
+            if torch.is_tensor(var):
+                dot.node(str(id(var)), size_to_str(var.size()), fillcolor='orange')
+            elif hasattr(var, 'variable'):
+                u = var.variable
+                name = param_map[id(u)] if params is not None else ''
+                node_name = '%s\n %s' % (name, size_to_str(u.size()))
+                dot.node(str(id(var)), node_name, fillcolor='lightblue')
+            else:
+                dot.node(str(id(var)), str(type(var).__name__))
+            seen.add(var)
+            if hasattr(var, 'next_functions'):
+                for u in var.next_functions:
+                    if u[0] is not None:
+                        dot.edge(str(id(u[0])), str(id(var)))
+                        add_nodes(u[0])
+            if hasattr(var, 'saved_tensors'):
+                for t in var.saved_tensors:
+                    dot.edge(str(id(t)), str(id(var)))
+                    add_nodes(t)
+    add_nodes(var.grad_fn)
+    return dot
+
+make_dot(output).view()
 
 import os
 glaucoma_dir = '/content/drive/My Drive/magisterka/glaucoma/train'
@@ -177,23 +215,3 @@ print(retinopathy_len)
 amd_dir = '/content/drive/My Drive/magisterka/amd/train'
 amd_len= len([name for name in os.listdir(amd_dir) if os.path.isfile(os.path.join(amd_dir, name))])
 print(amd_len)
-
-import os
-from getpass import getpass
-import urllib
-
-user = input('User name: ')
-password = getpass('Password: ')
-password = urllib.parse.quote(password) # your password is converted into url format
-repo_name = input('Repo name: ')
-
-cmd_string = 'git clone https://{0}:{1}@github.com/{0}/{2}.git'.format(user, password, repo_name)
-
-os.system(cmd_string)
-cmd_string, password = "", "" # removing the password from the variable
-
-!git status
-
-!git clone git@github.com:pharaburda/MasterThesis.git
-
-!cd MasterThesis;ls;git status

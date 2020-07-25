@@ -17,6 +17,7 @@ import os
 from torchvision.utils import save_image
 import torch.utils.data
 import torch.nn.functional as F
+from PIL import Image
 
 device = 'cuda:0'
 
@@ -48,9 +49,37 @@ def initialize_model(use_pretrained=True):
     synergicNet = SynergicNet().to(device)
     return first_component, second_component, synergicNet
 
-def train_model(num_epochs=10):
+def save_checkpoint(epoch):
+    path = "drive/My Drive/checkpoint.pt"
+    torch.save({
+            'epoch': epoch,
+            'first_component_state_dict': first_component.state_dict(),
+            'second_component_state_dict': second_component.state_dict(),
+            'synergic_component_state_dict': synergicNet.state_dict(),
+            'optimizer_1_state_dict': optimizer1.state_dict(),
+            'optimizer_2_state_dict': optimizer2.state_dict(),
+            'optimizer_S_state_dict': optimizerS.state_dict()
+            }, path)
+    
+def load_checkpoint():
+    path = "drive/My Drive/checkpoint.pt"
+    checkpoint = torch.load(path)
+    epoch = checkpoint['epoch']
+    first_component.load_state_dict(checkpoint['first_component_state_dict'])
+    second_component.load_state_dict(checkpoint['second_component_state_dict'])
+    synergicNet.load_state_dict(checkpoint['synergic_component_state_dict'])
+    optimizer1.load_state_dict(checkpoint['optimizer_1_state_dict'])
+    optimizer2.load_state_dict(checkpoint['optimizer_2_state_dict'])
+    optimizerS.load_state_dict(checkpoint['optimizer_S_state_dict'])
 
-    for epoch in range(num_epochs):
+    return epoch
+
+def train_model(num_epochs=10, use_checkpoint=False):
+    start_epoch = 0
+    if (use_checkpoint):
+      start_epoch = load_checkpoint()
+
+    for epoch in range(start_epoch, num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
 
@@ -64,6 +93,13 @@ def train_model(num_epochs=10):
                 first_component.eval()
                 second_component.eval()
                 synergicNet.eval()
+            
+            running_loss_1 = 0.0
+            running_corrects_1 = 0
+            running_loss_2 = 0.0
+            running_corrects_2 = 0
+            running_loss_s = 0.0
+            running_corrects_s = 0
 
             for inputs1, labels1 in imageloader_1[phase]:
                 inputs1 = inputs1.to(device)
@@ -81,6 +117,10 @@ def train_model(num_epochs=10):
                           loss1.backward(retain_graph=True)
                           optimizer1.step()
                       
+                      _, preds1 = torch.max(outputs1, 1)
+                      running_loss_1 += loss1.item() * inputs1.size(0)
+                      running_corrects_1 += torch.sum(preds1 == labels1.data)
+                      
                       optimizer2.zero_grad()
                       outputs2 = second_component(inputs2).to(device)
                       loss2 = criterion(outputs2, labels2)
@@ -88,6 +128,10 @@ def train_model(num_epochs=10):
                       if phase == 'train':
                           loss2.backward(retain_graph=True)
                           optimizer2.step()
+
+                      _, preds2 = torch.max(outputs2, 1)
+                      running_loss_2 += loss2.item() * inputs2.size(0)
+                      running_corrects_2 += torch.sum(preds2 == labels2.data)
 
                     out_1 = first_component(inputs1).to(device)
                     out_2 = second_component(inputs2).to(device)
@@ -100,10 +144,29 @@ def train_model(num_epochs=10):
                         if phase == 'train':
                             lossS.backward()
                             optimizerS.step()
+                    _, preds_s = torch.max(output, 1)
+                    running_loss_s += lossS.item() * (inputs1.size(0) + inputs2.size(0)) 
+                    running_corrects_s += torch.sum(preds_s == label.data)
+
+            calculations_count = len(imageloader_1[phase].dataset) * len(imageloader_2[phase].dataset)
+            epoch_loss_1 = running_loss_1 / calculations_count
+            epoch_acc_1 = running_corrects_1.double() / calculations_count
+
+            epoch_loss_2 = running_loss_2 / calculations_count
+            epoch_acc_2 = running_corrects_2.double() / calculations_count
+
+            epoch_loss_s = running_loss_s / calculations_count
+            epoch_acc_s = running_corrects_s.double() / calculations_count
+
+            print('{} First component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_1, epoch_acc_1))
+            print('{} Second component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_2, epoch_acc_2))
+            print('{} Synergic component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_s, epoch_acc_s))
+
+            save_checkpoint(epoch)
 
 torch.autograd.set_detect_anomaly(True)
 
-data_dir = '/content/drive/My Drive/magisterka_test'
+data_dir = '/content/drive/My Drive/magisterka'
 input_size = (224, 224)
 transform = transforms.Compose([
         transforms.Resize(input_size),
@@ -203,15 +266,43 @@ def make_dot(var, params=None):
 
 make_dot(output).view()
 
+data_dir = '/content/drive/My Drive/magisterka'
+input_size = (224, 224)
+transform = transforms.Compose([
+        transforms.Resize(input_size),
+        transforms.ToTensor()
+    ])
+flipTransform =  transforms.Compose([
+        transforms.Resize(input_size),
+        transforms.RandomHorizontalFlip(p=1),
+        transforms.ToTensor()
+    ])
+
+rotationTransform =  transforms.Compose([
+        transforms.Resize(input_size),
+        transforms.RandomRotation(degrees=10, resample=Image.BICUBIC),
+        transforms.ToTensor()
+    ])
+
+cropTransform =  transforms.Compose([
+        transforms.Resize(input_size),
+        transforms.RandomResizedCrop(input_size, scale=(0.8, 1.0), ratio=(1.0, 1.2)),
+        transforms.ToTensor()
+    ])
+
+image_dataset = {x: datasets.ImageFolder(os.path.join(data_dir, x), transform) for x in ['train', 'val']}
+img1 = image_dataset['train'][0][0]
+save_image(img1, 'img1.png')
+
 import os
-glaucoma_dir = '/content/drive/My Drive/magisterka/glaucoma/train'
+glaucoma_dir = '/content/drive/My Drive/magisterka/train/glaucoma'
 glaucoma_len= len([name for name in os.listdir(glaucoma_dir) if os.path.isfile(os.path.join(glaucoma_dir, name))])
 print(glaucoma_len) 
 
-retinopathy_dir = '/content/drive/My Drive/magisterka/diabetic retinopathy/train'
+retinopathy_dir = '/content/drive/My Drive/magisterka/train/diabetic retinopathy'
 retinopathy_len= len([name for name in os.listdir(retinopathy_dir) if os.path.isfile(os.path.join(retinopathy_dir, name))])
 print(retinopathy_len) 
 
-amd_dir = '/content/drive/My Drive/magisterka/amd/train'
+amd_dir = '/content/drive/My Drive/magisterka/train/amd'
 amd_len= len([name for name in os.listdir(amd_dir) if os.path.isfile(os.path.join(amd_dir, name))])
 print(amd_len)

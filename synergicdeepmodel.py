@@ -18,6 +18,8 @@ from torchvision.utils import save_image
 import torch.utils.data
 import torch.nn.functional as F
 from PIL import Image
+import time
+import re
 
 device = 'cuda:0'
 
@@ -75,6 +77,7 @@ def load_checkpoint():
     return epoch
 
 def train_model(num_epochs=10, use_checkpoint=False):
+    since = time.time()
     start_epoch = 0
     if (use_checkpoint):
       start_epoch = load_checkpoint()
@@ -101,54 +104,54 @@ def train_model(num_epochs=10, use_checkpoint=False):
             running_loss_s = 0.0
             running_corrects_s = 0
 
-            for inputs1, labels1 in imageloader_1[phase]:
+            for (inputs1, labels1), (inputs2, labels2) in zip(imageloader_1[phase], imageloader_2[phase]):
                 inputs1 = inputs1.to(device)
                 labels1 = labels1.to(device)
-                for inputs2, labels2 in imageloader_2[phase]:
-                    inputs2 = inputs2.to(device)
-                    labels2 = labels2.to(device)
+                # for inputs2, labels2 in imageloader_2[phase]:
+                inputs2 = inputs2.to(device)
+                labels2 = labels2.to(device)
 
-                    with torch.set_grad_enabled(phase == 'train'):
-                      optimizer1.zero_grad()
-                      outputs1 = first_component(inputs1).to(device)
-                      loss1 = criterion(outputs1, labels1)
+                with torch.set_grad_enabled(phase == 'train'):
+                  optimizer1.zero_grad()
+                  outputs1 = first_component(inputs1).to(device)
+                  loss1 = criterion(outputs1, labels1)
 
+                  if phase == 'train':
+                      loss1.backward(retain_graph=True)
+                      optimizer1.step()
+                  
+                  _, preds1 = torch.max(outputs1, 1)
+                  running_loss_1 += loss1.item() * inputs1.size(0)
+                  running_corrects_1 += torch.sum(preds1 == labels1.data)
+                  
+                  optimizer2.zero_grad()
+                  outputs2 = second_component(inputs2).to(device)
+                  loss2 = criterion(outputs2, labels2)
+
+                  if phase == 'train':
+                      loss2.backward(retain_graph=True)
+                      optimizer2.step()
+
+                  _, preds2 = torch.max(outputs2, 1)
+                  running_loss_2 += loss2.item() * inputs2.size(0)
+                  running_corrects_2 += torch.sum(preds2 == labels2.data)
+
+                  out_1 = first_component(inputs1).to(device)
+                  out_2 = second_component(inputs2).to(device)
+                  optimizerS.zero_grad()
+                  output = synergicNet(out_1, out_2)
+                  label = 1 if labels1==labels2 else 0
+                  label = torch.LongTensor([label]).to(device)
+                  with torch.set_grad_enabled(phase == 'train'):
+                      lossS = criterion(output, label)
                       if phase == 'train':
-                          loss1.backward(retain_graph=True)
-                          optimizer1.step()
-                      
-                      _, preds1 = torch.max(outputs1, 1)
-                      running_loss_1 += loss1.item() * inputs1.size(0)
-                      running_corrects_1 += torch.sum(preds1 == labels1.data)
-                      
-                      optimizer2.zero_grad()
-                      outputs2 = second_component(inputs2).to(device)
-                      loss2 = criterion(outputs2, labels2)
+                          lossS.backward()
+                          optimizerS.step()
+                  _, preds_s = torch.max(output, 1)
+                  running_loss_s += lossS.item() * (inputs1.size(0) + inputs2.size(0)) 
+                  running_corrects_s += torch.sum(preds_s == label.data)
 
-                      if phase == 'train':
-                          loss2.backward(retain_graph=True)
-                          optimizer2.step()
-
-                      _, preds2 = torch.max(outputs2, 1)
-                      running_loss_2 += loss2.item() * inputs2.size(0)
-                      running_corrects_2 += torch.sum(preds2 == labels2.data)
-
-                    out_1 = first_component(inputs1).to(device)
-                    out_2 = second_component(inputs2).to(device)
-                    optimizerS.zero_grad()
-                    output = synergicNet(out_1, out_2)
-                    label = 1 if labels1==labels2 else 0
-                    label = torch.LongTensor([label]).to(device)
-                    with torch.set_grad_enabled(phase == 'train'):
-                        lossS = criterion(output, label)
-                        if phase == 'train':
-                            lossS.backward()
-                            optimizerS.step()
-                    _, preds_s = torch.max(output, 1)
-                    running_loss_s += lossS.item() * (inputs1.size(0) + inputs2.size(0)) 
-                    running_corrects_s += torch.sum(preds_s == label.data)
-
-            calculations_count = len(imageloader_1[phase].dataset) * len(imageloader_2[phase].dataset)
+            calculations_count = len(imageloader_1[phase].dataset)
             epoch_loss_1 = running_loss_1 / calculations_count
             epoch_acc_1 = running_corrects_1.double() / calculations_count
 
@@ -163,6 +166,10 @@ def train_model(num_epochs=10, use_checkpoint=False):
             print('{} Synergic component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_s, epoch_acc_s))
 
             save_checkpoint(epoch)
+
+    print()
+    time_elapsed = time.time() - since
+    print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -266,7 +273,14 @@ def make_dot(var, params=None):
 
 make_dot(output).view()
 
-data_dir = '/content/drive/My Drive/magisterka'
+data_dir = '/content/drive/My Drive/magisterka/train'
+output_dir = data_dir + '/diabetic retinopathy/'
+GLAUCOMA = 2
+AMD = 0
+DR = 1
+flip_suffix = '_flip.jpg'
+rotated_suffix = '_rotated.jpg'
+
 input_size = (224, 224)
 transform = transforms.Compose([
         transforms.Resize(input_size),
@@ -290,9 +304,13 @@ cropTransform =  transforms.Compose([
         transforms.ToTensor()
     ])
 
-image_dataset = {x: datasets.ImageFolder(os.path.join(data_dir, x), transform) for x in ['train', 'val']}
-img1 = image_dataset['train'][0][0]
-save_image(img1, 'img1.png')
+image_dataset = datasets.ImageFolder(os.path.join(data_dir), rotationTransform)
+for file_path, file_class in image_dataset.imgs:
+  #print(file_path, file_class)
+  if file_class == DR:
+    file_name = os.path.splitext(os.path.basename(file_path))[0]
+    idx = image_dataset.imgs.index((file_path, file_class))
+    save_image(image_dataset[idx][0], output_dir + file_name + rotated_suffix)
 
 import os
 glaucoma_dir = '/content/drive/My Drive/magisterka/train/glaucoma'

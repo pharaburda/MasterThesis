@@ -20,22 +20,22 @@ import torch.nn.functional as F
 from PIL import Image
 import time
 import re
+import numpy as np
+import matplotlib.pyplot as plt
 
-device = 'cuda:0'
+device = 'cpu'
+#torch.cuda.set_device(0)
+num_classes = 4
 
 class SynergicNet(nn.Module):
     def __init__(self):
       super(SynergicNet, self).__init__()
-      self.conv1 = nn.Conv1d(1, 32, 1)
-      self.conv2 = nn.Conv1d(32, 64, 1)
-      self.fc1 = nn.Linear(4096, 128)
-      self.fc2 = nn.Linear(128, 2)
+      self.fc1 = nn.Linear(8, 2)
 
     def forward(self, first, second):
       x = torch.cat((first, second), 1).unsqueeze(1)
       x = torch.flatten(x, 1)
       x = self.fc1(x)
-      x = self.fc2(x)
       output = F.softmax(x, dim=1)
       return output
 
@@ -45,8 +45,11 @@ def initialize_model(use_pretrained=True):
     first_component = models.resnet50(pretrained=use_pretrained).to(device)
     second_component = models.resnet50(pretrained=use_pretrained).to(device)
 
-    first_component.fc = nn.Identity()
-    second_component.fc = nn.Identity()
+    num_ftrs = first_component.fc.in_features
+    first_component.fc = nn.Linear(num_ftrs, num_classes)
+
+    num_ftrs = second_component.fc.in_features
+    second_component.fc = nn.Linear(num_ftrs, num_classes)
 
     synergicNet = SynergicNet().to(device)
     return first_component, second_component, synergicNet
@@ -81,6 +84,10 @@ def train_model(num_epochs=10, use_checkpoint=False):
     start_epoch = 0
     if (use_checkpoint):
       start_epoch = load_checkpoint()
+    
+    best_acc_1 = 0
+    best_acc_2 = 0
+    best_acc_s = 0
 
     for epoch in range(start_epoch, num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
@@ -107,7 +114,6 @@ def train_model(num_epochs=10, use_checkpoint=False):
             for (inputs1, labels1), (inputs2, labels2) in zip(imageloader_1[phase], imageloader_2[phase]):
                 inputs1 = inputs1.to(device)
                 labels1 = labels1.to(device)
-                # for inputs2, labels2 in imageloader_2[phase]:
                 inputs2 = inputs2.to(device)
                 labels2 = labels2.to(device)
 
@@ -143,7 +149,7 @@ def train_model(num_epochs=10, use_checkpoint=False):
                   label = 1 if labels1==labels2 else 0
                   label = torch.LongTensor([label]).to(device)
                   with torch.set_grad_enabled(phase == 'train'):
-                      lossS = criterion(output, label)
+                      lossS = synergic_criterion(output, label)
                       if phase == 'train':
                           lossS.backward()
                           optimizerS.step()
@@ -166,10 +172,19 @@ def train_model(num_epochs=10, use_checkpoint=False):
             print('{} Synergic component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_s, epoch_acc_s))
 
             save_checkpoint(epoch)
+            if epoch_acc_1 > best_acc_1:
+              best_acc_1 = epoch_acc_1
+
+            if epoch_acc_2 > best_acc_2:
+              best_acc_2 = epoch_acc_2
+            
+            if epoch_acc_s > best_acc_s:
+              best_acc_s = epoch_acc_s
 
     print()
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+    print('Besc scores: first component {:.0f}, second component {:.0f} , synergic component {:.0f}'.format(best_acc_1, best_acc_2, best_acc_s))
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -191,8 +206,8 @@ for x in ['train', 'val']:
   subset_1[x] = s_1
   subset_2[x] = s_2
 
-imageloader_1 = {x: torch.utils.data.DataLoader(subset_1[x], shuffle=True, num_workers=4) for x in ['train', 'val']}
-imageloader_2 = {x: torch.utils.data.DataLoader(subset_2[x], shuffle=True, num_workers=4) for x in ['train', 'val']}
+imageloader_1 = {x: torch.utils.data.DataLoader(subset_1[x], shuffle=True, num_workers=16) for x in ['train', 'val']}
+imageloader_2 = {x: torch.utils.data.DataLoader(subset_2[x], shuffle=True, num_workers=16) for x in ['train', 'val']}
 
 first_component, second_component, synergicNet = initialize_model()
 
@@ -206,11 +221,13 @@ for param in synergicNet.parameters():
 
 optimizer1 = optim.SGD(first_component.parameters(), lr=0.001, momentum=0.9)
 optimizer2 = optim.SGD(second_component.parameters(), lr=0.001, momentum=0.9)
+#test performance without momentum (default is 0) 
 optimizerS = optim.SGD(params_to_update, lr=0.001, momentum=0.9)
 
 criterion = nn.CrossEntropyLoss()
+synergic_criterion = nn.HingeEmbeddingLoss()
 
-output = train_model()
+output = train_model(num_epochs=10)
 
 !pip install dask
 
@@ -273,8 +290,9 @@ def make_dot(var, params=None):
 
 make_dot(output).view()
 
-data_dir = '/content/drive/My Drive/magisterka/train'
-output_dir = data_dir + '/diabetic retinopathy/'
+data_dir = '/content/drive/My Drive/magisterka/val'
+output_dir = data_dir + '/normal/'
+NORMAL = 3
 GLAUCOMA = 2
 AMD = 0
 DR = 1
@@ -286,41 +304,107 @@ transform = transforms.Compose([
         transforms.Resize(input_size),
         transforms.ToTensor()
     ])
-flipTransform =  transforms.Compose([
+flipTransform = transforms.Compose([
         transforms.Resize(input_size),
         transforms.RandomHorizontalFlip(p=1),
         transforms.ToTensor()
     ])
 
-rotationTransform =  transforms.Compose([
+rotationTransform = transforms.Compose([
         transforms.Resize(input_size),
         transforms.RandomRotation(degrees=10, resample=Image.BICUBIC),
         transforms.ToTensor()
     ])
 
-cropTransform =  transforms.Compose([
+cropTransform = transforms.Compose([
         transforms.Resize(input_size),
         transforms.RandomResizedCrop(input_size, scale=(0.8, 1.0), ratio=(1.0, 1.2)),
         transforms.ToTensor()
     ])
 
-image_dataset = datasets.ImageFolder(os.path.join(data_dir), rotationTransform)
-for file_path, file_class in image_dataset.imgs:
+normalizeTransform = transforms.Compose([
+        transforms.Resize(input_size),
+        transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5)),
+        transforms.ToTensor()
+    ])
+
+def save_transformed_image():
+  image_dataset = datasets.ImageFolder(os.path.join(data_dir), rotationTransform)
+  for file_path, file_class in image_dataset.imgs:
   #print(file_path, file_class)
-  if file_class == DR:
+  if file_class == NORMAL:
     file_name = os.path.splitext(os.path.basename(file_path))[0]
     idx = image_dataset.imgs.index((file_path, file_class))
     save_image(image_dataset[idx][0], output_dir + file_name + rotated_suffix)
 
+
+image_dataset = datasets.ImageFolder(os.path.join(data_dir), rotationTransform)
+
 import os
-glaucoma_dir = '/content/drive/My Drive/magisterka/train/glaucoma'
+
+phase = 'val'
+ 
+glaucoma_dir = '/content/drive/My Drive/magisterka/' + phase + '/glaucoma'
 glaucoma_len= len([name for name in os.listdir(glaucoma_dir) if os.path.isfile(os.path.join(glaucoma_dir, name))])
-print(glaucoma_len) 
+glaucoma_list = ['glaucoma'] * glaucoma_len
+#print(glaucoma_len) 
 
-retinopathy_dir = '/content/drive/My Drive/magisterka/train/diabetic retinopathy'
+retinopathy_dir = '/content/drive/My Drive/magisterka/' + phase + '/diabetic retinopathy'
 retinopathy_len= len([name for name in os.listdir(retinopathy_dir) if os.path.isfile(os.path.join(retinopathy_dir, name))])
-print(retinopathy_len) 
+retinopathy_list = ['dr'] * retinopathy_len
+#print(retinopathy_len) 
 
-amd_dir = '/content/drive/My Drive/magisterka/train/amd'
+amd_dir = '/content/drive/My Drive/magisterka/' + phase + '/amd'
 amd_len= len([name for name in os.listdir(amd_dir) if os.path.isfile(os.path.join(amd_dir, name))])
-print(amd_len)
+amd_list = ['amd'] * amd_len
+#print(amd_len) 
+
+normal_dir = '/content/drive/My Drive/magisterka/' + phase + '/normal'
+normal_len= len([name for name in os.listdir(normal_dir) if os.path.isfile(os.path.join(normal_dir, name))])
+normal_list = ['normal'] * normal_len
+#print(normal_len)
+
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+
+def get_label_for_class(disease_class):
+   return {
+        0: 'amd',
+        1: 'dr',
+        2: 'glaucoma',
+        3: 'normal'
+    }[disease_class]
+
+y_test = np.concatenate([amd_list, retinopathy_list, glaucoma_list, normal_list])
+
+image_dataset = datasets.ImageFolder(os.path.join(data_dir, 'val'), transform)
+
+train_dataset = torch.utils.data.DataLoader(
+        image_dataset, shuffle=False, num_workers=16
+    )
+
+first_component.eval()
+y_pred = []
+
+for data, target in train_dataset:
+  out = first_component(data)
+  _, preds_s = torch.max(out, 1)
+  
+  disease_class = preds_s.numpy()[0]
+  y_pred.append(get_label_for_class(disease_class))
+
+
+print(classification_report(y_pred, y_test))
+
+labels = ['amd', 'dr', 'glaucoma', 'normal']
+matrix = confusion_matrix(y_test, y_pred)
+print(matrix)
+
+ax= plt.subplot()
+sns.heatmap(matrix, annot=True, ax=ax)
+
+ax.set_xlabel('Predicted')
+ax.set_ylabel('True')
+ax.xaxis.set_ticklabels(labels)
+ax.yaxis.set_ticklabels(labels)
+plt.savefig('confusion matrix')

@@ -23,71 +23,82 @@ import re
 import numpy as np
 import matplotlib.pyplot as plt
 
-device = 'cpu'
-#torch.cuda.set_device(0)
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 num_classes = 4
 
 class SynergicNet(nn.Module):
     def __init__(self):
       super(SynergicNet, self).__init__()
-      self.fc1 = nn.Linear(8, 2)
+      self.fc1 = nn.Linear(4096, 1024)
+      self.fc2 = nn.Linear(1024, 256)
+      self.fc3 = nn.Linear(256, 2)
 
     def forward(self, first, second):
       x = torch.cat((first, second), 1).unsqueeze(1)
       x = torch.flatten(x, 1)
       x = self.fc1(x)
+      x = self.fc2(x)
+      x = self.fc3(x)
       output = F.softmax(x, dim=1)
       return output
 
 
-def initialize_model(use_pretrained=True):
+def initialize_model(device, use_pretrained=True):
+    model_1 = None
+    model_2 = None
     torch.manual_seed(10)
-    first_component = models.resnet50(pretrained=use_pretrained).to(device)
-    second_component = models.resnet50(pretrained=use_pretrained).to(device)
 
-    num_ftrs = first_component.fc.in_features
-    first_component.fc = nn.Linear(num_ftrs, num_classes)
+    model_1 = models.resnet50(pretrained=use_pretrained)#.to(device)
+    model_2 = models.resnet50(pretrained=use_pretrained)#.to(device)
 
-    num_ftrs = second_component.fc.in_features
-    second_component.fc = nn.Linear(num_ftrs, num_classes)
+    num_ftrs = model_1.fc.in_features
+    model_1.fc = nn.Linear(num_ftrs, num_classes)
 
-    synergicNet = SynergicNet().to(device)
-    return first_component, second_component, synergicNet
+    num_ftrs = model_2.fc.in_features
+    model_2.fc = nn.Linear(num_ftrs, num_classes)
 
-def save_checkpoint(epoch):
+    model_s = SynergicNet()#.to(device)
+    return model_1, model_2, model_s
+
+def save_checkpoint(epoch, model_c1, model_c2, model_cs, optimizer_c1,
+                    optimizer_c2, optimizer_cs):
     path = "drive/My Drive/checkpoint.pt"
     torch.save({
             'epoch': epoch,
-            'first_component_state_dict': first_component.state_dict(),
-            'second_component_state_dict': second_component.state_dict(),
-            'synergic_component_state_dict': synergicNet.state_dict(),
-            'optimizer_1_state_dict': optimizer1.state_dict(),
-            'optimizer_2_state_dict': optimizer2.state_dict(),
-            'optimizer_S_state_dict': optimizerS.state_dict()
+            'first_component_state_dict': model_c1.state_dict(),
+            'second_component_state_dict': model_c2.state_dict(),
+            'synergic_component_state_dict': model_cs.state_dict(),
+            'optimizer_1_state_dict': optimizer_c1.state_dict(),
+            'optimizer_2_state_dict': optimizer_c2.state_dict(),
+            'optimizer_S_state_dict': optimizer_cs.state_dict()
             }, path)
     
-def load_checkpoint():
+def load_checkpoint(model_c1, model_c2, model_cs, optimizer_c1, optimizer_c2,
+                    optimizer_cs):
     path = "drive/My Drive/checkpoint.pt"
     checkpoint = torch.load(path)
     epoch = checkpoint['epoch']
-    first_component.load_state_dict(checkpoint['first_component_state_dict'])
-    second_component.load_state_dict(checkpoint['second_component_state_dict'])
-    synergicNet.load_state_dict(checkpoint['synergic_component_state_dict'])
-    optimizer1.load_state_dict(checkpoint['optimizer_1_state_dict'])
-    optimizer2.load_state_dict(checkpoint['optimizer_2_state_dict'])
-    optimizerS.load_state_dict(checkpoint['optimizer_S_state_dict'])
+    model_c1.load_state_dict(checkpoint['first_component_state_dict'])
+    model_c2.load_state_dict(checkpoint['second_component_state_dict'])
+    model_cs.load_state_dict(checkpoint['synergic_component_state_dict'])
+    optimizer_c1.load_state_dict(checkpoint['optimizer_1_state_dict'])
+    optimizer_c2.load_state_dict(checkpoint['optimizer_2_state_dict'])
+    optimizer_cs.load_state_dict(checkpoint['optimizer_S_state_dict'])
 
     return epoch
 
-def train_model(num_epochs=10, use_checkpoint=False):
+def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_c2, 
+                optimizer_c1, optimizer_c2, optimizer_cs,
+                criterion_c1, criterion_c2, criterion_cs, num_epochs = 7,
+                use_checkpoint = False):
     since = time.time()
     start_epoch = 0
     if (use_checkpoint):
-      start_epoch = load_checkpoint()
+        start_epoch = load_checkpoint() # todo add positional arguments
     
-    best_acc_1 = 0
-    best_acc_2 = 0
-    best_acc_s = 0
+    best_acc_1 = 0.0
+    best_acc_2 = 0.0
+    best_acc_s = 0.0
 
     for epoch in range(start_epoch, num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
@@ -95,139 +106,157 @@ def train_model(num_epochs=10, use_checkpoint=False):
 
         for phase in ['train', 'val']:
             if phase == 'train':
-                first_component.train()
-                second_component.train()
-                synergicNet.train()
+                model_c1.train()
+                model_c2.train()
+                model_cs.train()
                 
             else:
-                first_component.eval()
-                second_component.eval()
-                synergicNet.eval()
+                model_c1.eval()
+                model_c2.eval()
+                model_cs.eval()
             
-            running_loss_1 = 0.0
-            running_corrects_1 = 0
-            running_loss_2 = 0.0
-            running_corrects_2 = 0
+            running_loss_c1 = 0.0
+            running_corrects_c1 = 0
+            running_loss_c2 = 0.0
+            running_corrects_c2 = 0
             running_loss_s = 0.0
             running_corrects_s = 0
 
-            for (inputs1, labels1), (inputs2, labels2) in zip(imageloader_1[phase], imageloader_2[phase]):
-                inputs1 = inputs1.to(device)
-                labels1 = labels1.to(device)
-                inputs2 = inputs2.to(device)
-                labels2 = labels2.to(device)
+            for (input_c1, label_c1), (input_c2, label_c2) in zip(dataloader_c1[phase], dataloader_c2[phase]):
+                input_c1 = input_c1.to(device)
+                label_c1 = label_c1.to(device)
+                input_c2 = input_c2.to(device)
+                label_c2 = label_c2.to(device)
 
+                optimizer_c1.zero_grad()
                 with torch.set_grad_enabled(phase == 'train'):
-                  optimizer1.zero_grad()
-                  outputs1 = first_component(inputs1).to(device)
-                  loss1 = criterion(outputs1, labels1)
+                    outputs_c1 = model_c1(input_c1)
+                    #labels_c1_2d = label_c1.repeat(1,num_classes)
+                    loss_c1 = criterion_c1(outputs_c1, label_c1)
 
-                  if phase == 'train':
-                      loss1.backward(retain_graph=True)
-                      optimizer1.step()
+                    _, preds_c1 = torch.max(outputs_c1, 1)
+
+                    if phase == 'train':
+                        loss_c1.backward()
+                        optimizer_c1.step()
                   
-                  _, preds1 = torch.max(outputs1, 1)
-                  running_loss_1 += loss1.item() * inputs1.size(0)
-                  running_corrects_1 += torch.sum(preds1 == labels1.data)
+                running_loss_c1 += loss_c1.item() #* input_c1.size(0)
+                running_corrects_c1 += torch.sum(preds_c1 == label_c1.data)
                   
-                  optimizer2.zero_grad()
-                  outputs2 = second_component(inputs2).to(device)
-                  loss2 = criterion(outputs2, labels2)
+                optimizer_c2.zero_grad()
+                with torch.set_grad_enabled(phase == 'train'):
+                    outputs_c2 = model_c2(input_c2)
+                    #labels_c2_2d = label_c2.repeat(1,num_classes)
+                    loss_c2 = criterion_c2(outputs_c2, label_c2)
 
-                  if phase == 'train':
-                      loss2.backward(retain_graph=True)
-                      optimizer2.step()
+                    _, preds_c2 = torch.max(outputs_c2, 1)
 
-                  _, preds2 = torch.max(outputs2, 1)
-                  running_loss_2 += loss2.item() * inputs2.size(0)
-                  running_corrects_2 += torch.sum(preds2 == labels2.data)
+                    if phase == 'train':
+                        loss_c2.backward()
+                        optimizer_c2.step()
 
-                  out_1 = first_component(inputs1).to(device)
-                  out_2 = second_component(inputs2).to(device)
-                  optimizerS.zero_grad()
-                  output = synergicNet(out_1, out_2)
-                  label = 1 if labels1==labels2 else 0
-                  label = torch.LongTensor([label]).to(device)
-                  with torch.set_grad_enabled(phase == 'train'):
-                      lossS = synergic_criterion(output, label)
-                      if phase == 'train':
-                          lossS.backward()
-                          optimizerS.step()
-                  _, preds_s = torch.max(output, 1)
-                  running_loss_s += lossS.item() * (inputs1.size(0) + inputs2.size(0)) 
-                  running_corrects_s += torch.sum(preds_s == label.data)
+                running_loss_c2 += loss_c2.item() #* input_c2.size(0)
+                running_corrects_c2 += torch.sum(preds_c2 == label_c2.data)
 
-            calculations_count = len(imageloader_1[phase].dataset)
-            epoch_loss_1 = running_loss_1 / calculations_count
-            epoch_acc_1 = running_corrects_1.double() / calculations_count
+                optimizerS.zero_grad()
+                with torch.set_grad_enabled(phase == 'train'):
+                    f_extract_c1 = torch.nn.Sequential(*list(model_c1.children())[:-1])
+                    f_extract_c2 = torch.nn.Sequential(*list(model_c2.children())[:-1])
+                    out_1 = f_extract_c1(input_c1)
+                    out_2 = f_extract_c2(input_c2)
+                
+                    output = model_cs(out_1, out_2)
+                    label = 1 if label_c1==label_c2 else 0
+                    label = torch.LongTensor([label]).to(device)
 
-            epoch_loss_2 = running_loss_2 / calculations_count
-            epoch_acc_2 = running_corrects_2.double() / calculations_count
+                    lossS = criterion_cs(output, label)
+
+                    _, preds_s = torch.max(output, 1)
+
+                    if phase == 'train':
+                        lossS.backward()
+                        optimizerS.step()
+               
+                running_loss_s += lossS.item() #* (input_c1.size(0) + input_c2.size(0)) 
+                running_corrects_s += torch.sum(preds_s == label.data)
+
+            calculations_count = len(dataloader_c1[phase].dataset)
+
+            epoch_loss = running_loss_c1 / calculations_count
+            epoch_acc = running_corrects_c1.double() / calculations_count
+
+            epoch_loss_2 = running_loss_c2 / calculations_count
+            epoch_acc_2 = running_corrects_c2.double() / calculations_count
 
             epoch_loss_s = running_loss_s / calculations_count
             epoch_acc_s = running_corrects_s.double() / calculations_count
 
-            print('{} First component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_1, epoch_acc_1))
+            print('{} First component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
             print('{} Second component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_2, epoch_acc_2))
             print('{} Synergic component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_s, epoch_acc_s))
 
-            save_checkpoint(epoch)
-            if epoch_acc_1 > best_acc_1:
-              best_acc_1 = epoch_acc_1
+            #save_checkpoint(epoch) todo positional arguments
+            if phase == 'val' and epoch_acc > best_acc_1:
+              best_acc_1 = epoch_acc
 
-            if epoch_acc_2 > best_acc_2:
+            if phase == 'val' and epoch_acc_2 > best_acc_2:
               best_acc_2 = epoch_acc_2
             
-            if epoch_acc_s > best_acc_s:
+            if phase == 'val' and epoch_acc_s > best_acc_s:
               best_acc_s = epoch_acc_s
 
     print()
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-    print('Besc scores: first component {:.0f}, second component {:.0f} , synergic component {:.0f}'.format(best_acc_1, best_acc_2, best_acc_s))
-
-torch.autograd.set_detect_anomaly(True)
+    print('Besc scores: first component {:.4f}, second component {:.4f} , synergic component {:.4f}'.format(best_acc_1, best_acc_2, best_acc_s))
 
 data_dir = '/content/drive/My Drive/magisterka'
+class_count = {"train": 472, "val": 64}
 input_size = (224, 224)
 transform = transforms.Compose([
         transforms.Resize(input_size),
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        transforms.Normalize([0.5,0.5,0.5],[0.5,0.5,0.5])
     ])
 
 image_dataset = {x: datasets.ImageFolder(os.path.join(data_dir, x), transform) for x in ['train', 'val']}
-dataset_len = {x: len(image_dataset[x]) for x in ['train', 'val']}
-half_len = {x: int(len(image_dataset[x]) /2) for x in ['train', 'val']}
+# dataset_len = {x: len(image_dataset[x]) for x in ['train', 'val']}
+# half_len = {x: int(len(image_dataset[x]) /2) for x in ['train', 'val']}
 
-subset_1 = {}
-subset_2 = {}
-for x in ['train', 'val']:
-  s_1, s_2 = torch.utils.data.random_split(image_dataset[x], [half_len[x], half_len[x]])
-  subset_1[x] = s_1
-  subset_2[x] = s_2
+# subset_1 = {}
+# subset_2 = {}
+# for x in ['train', 'val']:
+#   for i in num_classes: 
+#   #s_1, s_2 = torch.utils.data.random_split(image_dataset[x], [half_len[x], half_len[x]])
+#   subset_1[x] = s_1
+#   subset_2[x] = s_2
 
-imageloader_1 = {x: torch.utils.data.DataLoader(subset_1[x], shuffle=True, num_workers=16) for x in ['train', 'val']}
-imageloader_2 = {x: torch.utils.data.DataLoader(subset_2[x], shuffle=True, num_workers=16) for x in ['train', 'val']}
+imageloader_c1 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, num_workers=8) for x in ['train', 'val']}
+imageloader_c2 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, num_workers=8) for x in ['train', 'val']}
 
-first_component, second_component, synergicNet = initialize_model()
+model_c1, model_c2, model_cs = initialize_model(device)
+model_c1 = model_c1.to(device)
+model_c2 = model_c2.to(device)
+model_cs = model_cs.to(device)
 
 params_to_update = []
-for param in first_component.parameters():
+for param in model_c1.parameters():
   params_to_update.append(param)
-for param in second_component.parameters():
+for param in model_c2.parameters():
   params_to_update.append(param)
-for param in synergicNet.parameters():
+for param in model_cs.parameters():
   params_to_update.append(param)
 
-optimizer1 = optim.SGD(first_component.parameters(), lr=0.001, momentum=0.9)
-optimizer2 = optim.SGD(second_component.parameters(), lr=0.001, momentum=0.9)
-#test performance without momentum (default is 0) 
-optimizerS = optim.SGD(params_to_update, lr=0.001, momentum=0.9)
+optimizer1 = optim.SGD(model_c1.parameters(), lr=0.0003, momentum=0.9)
+optimizer2 = optim.SGD(model_c2.parameters(), lr=0.0003, momentum=0.9)
+optimizerS = optim.SGD(params_to_update, lr=0.0003, momentum=0.9)
 
-criterion = nn.CrossEntropyLoss()
+criterion_c1 = nn.CrossEntropyLoss()
+criterion_c2 = nn.CrossEntropyLoss()
 synergic_criterion = nn.HingeEmbeddingLoss()
 
-output = train_model(num_epochs=10)
+output = train_model(device, model_c1, model_c2, model_cs, imageloader_c1, imageloader_c2,
+                     optimizer1,optimizer2,optimizerS, criterion_c1, criterion_c2, synergic_criterion)
 
 !pip install dask
 
@@ -342,27 +371,27 @@ image_dataset = datasets.ImageFolder(os.path.join(data_dir), rotationTransform)
 
 import os
 
-phase = 'val'
+phase = 'train'
  
 glaucoma_dir = '/content/drive/My Drive/magisterka/' + phase + '/glaucoma'
 glaucoma_len= len([name for name in os.listdir(glaucoma_dir) if os.path.isfile(os.path.join(glaucoma_dir, name))])
 glaucoma_list = ['glaucoma'] * glaucoma_len
-#print(glaucoma_len) 
+print(glaucoma_len) 
 
 retinopathy_dir = '/content/drive/My Drive/magisterka/' + phase + '/diabetic retinopathy'
 retinopathy_len= len([name for name in os.listdir(retinopathy_dir) if os.path.isfile(os.path.join(retinopathy_dir, name))])
 retinopathy_list = ['dr'] * retinopathy_len
-#print(retinopathy_len) 
+print(retinopathy_len) 
 
 amd_dir = '/content/drive/My Drive/magisterka/' + phase + '/amd'
 amd_len= len([name for name in os.listdir(amd_dir) if os.path.isfile(os.path.join(amd_dir, name))])
 amd_list = ['amd'] * amd_len
-#print(amd_len) 
+print(amd_len) 
 
 normal_dir = '/content/drive/My Drive/magisterka/' + phase + '/normal'
 normal_len= len([name for name in os.listdir(normal_dir) if os.path.isfile(os.path.join(normal_dir, name))])
 normal_list = ['normal'] * normal_len
-#print(normal_len)
+print(normal_len)
 
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
@@ -380,7 +409,7 @@ y_test = np.concatenate([amd_list, retinopathy_list, glaucoma_list, normal_list]
 image_dataset = datasets.ImageFolder(os.path.join(data_dir, 'val'), transform)
 
 train_dataset = torch.utils.data.DataLoader(
-        image_dataset, shuffle=False, num_workers=16
+        image_dataset, shuffle=False, num_workers=8
     )
 
 first_component.eval()
@@ -408,3 +437,161 @@ ax.set_ylabel('True')
 ax.xaxis.set_ticklabels(labels)
 ax.yaxis.set_ticklabels(labels)
 plt.savefig('confusion matrix')
+
+import cv2
+import numpy as np
+import torch
+from torchvision import models
+
+class FeatureExtractor():
+    """ Class for extracting activations and
+    registering gradients from targetted intermediate layers """
+
+    def __init__(self, model, target_layers):
+        self.model = model
+        self.target_layers = target_layers
+        self.gradients = []
+
+    def save_gradient(self, grad):
+        self.gradients.append(grad)
+
+    def __call__(self, x):
+        outputs = []
+        self.gradients = []
+        for name, module in self.model._modules.items():
+            x = module(x)
+            if name in self.target_layers:
+                x.register_hook(self.save_gradient)
+                outputs += [x]
+        return outputs, x
+
+
+class ModelOutputs():
+    """ Class for making a forward pass, and getting:
+    1. The network output.
+    2. Activations from intermeddiate targetted layers.
+    3. Gradients from intermeddiate targetted layers. """
+
+    def __init__(self, model, feature_module, target_layers):
+        self.model = model
+        self.feature_module = feature_module
+        self.feature_extractor = FeatureExtractor(self.feature_module, target_layers)
+
+    def get_gradients(self):
+        return self.feature_extractor.gradients
+
+    def __call__(self, x):
+        target_activations = []
+        for name, module in self.model._modules.items():
+            if module == self.feature_module:
+                target_activations, x = self.feature_extractor(x)
+            elif "avgpool" in name.lower():
+                x = module(x)
+                x = x.view(x.size(0),-1)
+            else:
+                x = module(x)
+
+        return target_activations, x
+
+
+def preprocess_image(img):
+    means = [0.485, 0.456, 0.406]
+    stds = [0.229, 0.224, 0.225]
+
+    preprocessed_img = img.copy()[:, :, ::-1]
+    for i in range(3):
+        preprocessed_img[:, :, i] = preprocessed_img[:, :, i] - means[i]
+        preprocessed_img[:, :, i] = preprocessed_img[:, :, i] / stds[i]
+    preprocessed_img = \
+        np.ascontiguousarray(np.transpose(preprocessed_img, (2, 0, 1)))
+    preprocessed_img = torch.from_numpy(preprocessed_img)
+    preprocessed_img.unsqueeze_(0)
+    input = preprocessed_img.requires_grad_(True)
+    return input
+
+
+def show_cam_on_image(img, mask):
+    heatmap = cv2.applyColorMap(np.uint8(255 * mask), cv2.COLORMAP_JET)
+    heatmap = np.float32(heatmap) / 255
+    cam = heatmap + np.float32(img)
+    cam = cam / np.max(cam)
+    cv2.imwrite("cam.jpg", np.uint8(255 * cam))
+
+
+class GradCam:
+    def __init__(self, model, feature_module, target_layer_names, use_cuda):
+        self.model = model
+        self.feature_module = feature_module
+        self.model.eval()
+        self.cuda = use_cuda
+        if self.cuda:
+            self.model = model.cuda()
+
+        self.extractor = ModelOutputs(self.model, self.feature_module, target_layer_names)
+
+    def forward(self, input):
+        return self.model(input)
+
+    def __call__(self, input, index=None):
+        if self.cuda:
+            features, output = self.extractor(input.cuda())
+        else:
+            features, output = self.extractor(input)
+
+        if index == None:
+            index = np.argmax(output.cpu().data.numpy())
+
+        one_hot = np.zeros((1, output.size()[-1]), dtype=np.float32)
+        one_hot[0][index] = 1
+        one_hot = torch.from_numpy(one_hot).requires_grad_(True)
+        if self.cuda:
+            one_hot = torch.sum(one_hot.cuda() * output)
+        else:
+            one_hot = torch.sum(one_hot * output)
+
+        self.feature_module.zero_grad()
+        self.model.zero_grad()
+        one_hot.backward(retain_graph=True)
+
+        grads_val = self.extractor.get_gradients()[-1].cpu().data.numpy()
+
+        target = features[-1]
+        target = target.cpu().data.numpy()[0, :]
+
+        weights = np.mean(grads_val, axis=(2, 3))[0, :]
+        cam = np.zeros(target.shape[1:], dtype=np.float32)
+
+        for i, w in enumerate(weights):
+            cam += w * target[i, :, :]
+
+        cam = np.maximum(cam, 0)
+        cam = cv2.resize(cam, input.shape[2:])
+        cam = cam - np.min(cam)
+        cam = cam / np.max(cam)
+        return cam
+
+def deprocess_image(img):
+    """ see https://github.com/jacobgil/keras-grad-cam/blob/master/grad-cam.py#L65 """
+    img = img - np.mean(img)
+    img = img / (np.std(img) + 1e-5)
+    img = img * 0.1
+    img = img + 0.5
+    img = np.clip(img, 0, 1)
+    return np.uint8(img*255)
+
+
+image_path = '/content/drive/My Drive/magisterka/val/diabetic retinopathy/IDRiD_413_flip.jpg'
+
+grad_cam = GradCam(model=first_component, feature_module=first_component.layer4, target_layer_names=["2"], use_cuda=False)
+
+img = cv2.imread(image_path)
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+img = np.float32(cv2.resize(img, (224, 224))) / 255
+input = preprocess_image(img)
+
+# If None, returns the map for the highest scoring category.
+# Otherwise, targets the requested index.
+target_index = None
+mask = grad_cam(input, target_index)
+
+show_cam_on_image(img, mask)

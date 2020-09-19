@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 num_classes = 4
+batch_size = 5
 
 class SynergicNet(nn.Module):
     def __init__(self):
@@ -123,6 +124,7 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
             running_loss_s = 0.0
             running_corrects_s = 0
 
+            # todo rename into inputs and labels
             for (input_c1, label_c1), (input_c2, label_c2) in zip(dataloader_c1[phase], dataloader_c2[phase]):
                 input_c1 = input_c1.to(device)
                 label_c1 = label_c1.to(device)
@@ -132,7 +134,6 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
                 optimizer_c1.zero_grad()
                 with torch.set_grad_enabled(phase == 'train'):
                     outputs_c1 = model_c1(input_c1)
-                    #labels_c1_2d = label_c1.repeat(1,num_classes)
                     loss_c1 = criterion_c1(outputs_c1, label_c1)
 
                     _, preds_c1 = torch.max(outputs_c1, 1)
@@ -141,13 +142,12 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
                         loss_c1.backward()
                         optimizer_c1.step()
                   
-                running_loss_c1 += loss_c1.item() #* input_c1.size(0)
+                running_loss_c1 += loss_c1.item()
                 running_corrects_c1 += torch.sum(preds_c1 == label_c1.data)
                   
                 optimizer_c2.zero_grad()
                 with torch.set_grad_enabled(phase == 'train'):
                     outputs_c2 = model_c2(input_c2)
-                    #labels_c2_2d = label_c2.repeat(1,num_classes)
                     loss_c2 = criterion_c2(outputs_c2, label_c2)
 
                     _, preds_c2 = torch.max(outputs_c2, 1)
@@ -156,7 +156,7 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
                         loss_c2.backward()
                         optimizer_c2.step()
 
-                running_loss_c2 += loss_c2.item() #* input_c2.size(0)
+                running_loss_c2 += loss_c2.item()
                 running_corrects_c2 += torch.sum(preds_c2 == label_c2.data)
 
                 optimizerS.zero_grad()
@@ -167,8 +167,8 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
                     out_2 = f_extract_c2(input_c2)
                 
                     output = model_cs(out_1, out_2)
-                    label = 1 if label_c1==label_c2 else 0
-                    label = torch.LongTensor([label]).to(device)
+                    label = [1 if x==y else 0 for x, y in zip(label_c1, label_c2)]
+                    label = torch.LongTensor(label).to(device)
 
                     lossS = criterion_cs(output, label)
 
@@ -178,7 +178,7 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
                         lossS.backward()
                         optimizerS.step()
                
-                running_loss_s += lossS.item() #* (input_c1.size(0) + input_c2.size(0)) 
+                running_loss_s += lossS.item()
                 running_corrects_s += torch.sum(preds_s == label.data)
 
             calculations_count = len(dataloader_c1[phase].dataset)
@@ -212,6 +212,16 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
     print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     print('Besc scores: first component {:.4f}, second component {:.4f} , synergic component {:.4f}'.format(best_acc_1, best_acc_2, best_acc_s))
 
+import numpy as np
+
+labels_1 = [1, 2, 3, 4, 5]
+labels_2 = [5, 4, 3, 2, 1]
+
+out_syn = [1 if x==y else 0 for x, y in zip(labels_1, labels_2)]
+#out_syn = [out_syn, out_syn]
+
+print(out_syn)
+
 class RandomMask(object):
     """Replaces black pixels with random ones."""
 
@@ -243,8 +253,8 @@ image_dataset = {x: datasets.ImageFolder(os.path.join(data_dir, x), transform) f
 #print(image_dataset['train'][0][0])
 #image_dataset['train'][0][0].save('image.jpg')
 
-imageloader_c1 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, num_workers=8) for x in ['train', 'val']}
-imageloader_c2 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, num_workers=8) for x in ['train', 'val']}
+imageloader_c1 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, batch_size=batch_size, num_workers=8) for x in ['train', 'val']}
+imageloader_c2 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, batch_size=batch_size, num_workers=8) for x in ['train', 'val']}
 
 model_c1, model_c2, model_cs = initialize_model(device)
 model_c1 = model_c1.to(device)
@@ -265,11 +275,13 @@ optimizerS = optim.SGD(params_to_update, lr=0.0003, momentum=0.9)
 
 criterion_c1 = nn.CrossEntropyLoss()
 criterion_c2 = nn.CrossEntropyLoss()
-synergic_criterion = nn.HingeEmbeddingLoss()
+synergic_criterion = nn.CrossEntropyLoss()
 
 output = train_model(device, model_c1, model_c2, model_cs, imageloader_c1, imageloader_c2,
                      optimizer1,optimizer2,optimizerS, criterion_c1, criterion_c2,
                      synergic_criterion, num_epochs = 3, use_checkpoint = False)
+
+print(*list(model_c2.children()))
 
 !pip install dask
 

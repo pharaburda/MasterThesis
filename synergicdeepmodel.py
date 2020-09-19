@@ -94,7 +94,8 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
     since = time.time()
     start_epoch = 0
     if (use_checkpoint):
-        start_epoch = load_checkpoint() # todo add positional arguments
+        start_epoch = load_checkpoint(model_c1, model_c2, model_cs, optimizer_c1,
+                                      optimizer_c2, optimizer_cs) + 1
     
     best_acc_1 = 0.0
     best_acc_2 = 0.0
@@ -195,7 +196,8 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
             print('{} Second component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_2, epoch_acc_2))
             print('{} Synergic component loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss_s, epoch_acc_s))
 
-            #save_checkpoint(epoch) todo positional arguments
+            save_checkpoint(epoch, model_c1, model_c2, model_cs, optimizer_c1,
+                    optimizer_c2, optimizer_cs)
             if phase == 'val' and epoch_acc > best_acc_1:
               best_acc_1 = epoch_acc
 
@@ -210,26 +212,36 @@ def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_
     print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     print('Besc scores: first component {:.4f}, second component {:.4f} , synergic component {:.4f}'.format(best_acc_1, best_acc_2, best_acc_s))
 
+class RandomMask(object):
+    """Replaces black pixels with random ones."""
+
+    def __call__(self, image):
+      h = image.size[0]
+      w = image.size[1]
+      pixels = image.load()
+
+      for y in range(0, h):
+          for x in range(0, w):
+              if (pixels[y,x]==(0,0,0)):
+                r = np.random.randint(low = 0, high = 255)
+                g = np.random.randint(low = 0, high = 255)
+                b = np.random.randint(low = 0, high = 255)
+                image.putpixel((y, x),(r, g, b))
+      return image
+
 data_dir = '/content/drive/My Drive/magisterka'
 class_count = {"train": 472, "val": 64}
 input_size = (224, 224)
 transform = transforms.Compose([
         transforms.Resize(input_size),
+        RandomMask(),
         transforms.ToTensor(),
         transforms.Normalize([0.5,0.5,0.5],[0.5,0.5,0.5])
     ])
 
 image_dataset = {x: datasets.ImageFolder(os.path.join(data_dir, x), transform) for x in ['train', 'val']}
-# dataset_len = {x: len(image_dataset[x]) for x in ['train', 'val']}
-# half_len = {x: int(len(image_dataset[x]) /2) for x in ['train', 'val']}
-
-# subset_1 = {}
-# subset_2 = {}
-# for x in ['train', 'val']:
-#   for i in num_classes: 
-#   #s_1, s_2 = torch.utils.data.random_split(image_dataset[x], [half_len[x], half_len[x]])
-#   subset_1[x] = s_1
-#   subset_2[x] = s_2
+#print(image_dataset['train'][0][0])
+#image_dataset['train'][0][0].save('image.jpg')
 
 imageloader_c1 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, num_workers=8) for x in ['train', 'val']}
 imageloader_c2 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, num_workers=8) for x in ['train', 'val']}
@@ -256,7 +268,8 @@ criterion_c2 = nn.CrossEntropyLoss()
 synergic_criterion = nn.HingeEmbeddingLoss()
 
 output = train_model(device, model_c1, model_c2, model_cs, imageloader_c1, imageloader_c2,
-                     optimizer1,optimizer2,optimizerS, criterion_c1, criterion_c2, synergic_criterion)
+                     optimizer1,optimizer2,optimizerS, criterion_c1, criterion_c2,
+                     synergic_criterion, num_epochs = 3, use_checkpoint = False)
 
 !pip install dask
 
@@ -369,9 +382,50 @@ def save_transformed_image():
 
 image_dataset = datasets.ImageFolder(os.path.join(data_dir), rotationTransform)
 
+import cv2
+
+src1 = cv2.imread('/content/drive/My Drive/random images/random image 1.jpg')
+src2 = cv2.imread('/content/drive/My Drive/random images/random image 2.jpg')
+src3 = cv2.imread('/content/drive/My Drive/random images/random image 3.jpg')
+src4 = cv2.imread('/content/drive/My Drive/random images/random image 4.jpg')
+src5 = cv2.imread('/content/drive/My Drive/random images/random image.jpeg')
+
+src1 = cv2.resize(src1, (224,224))
+src2 = cv2.resize(src2, (224,224))
+src3 = cv2.resize(src3, (224,224))
+src4 = cv2.resize(src4, (224,224))
+src5 = cv2.resize(src5, (224,224))
+
+dst1 = cv2.addWeighted(src1, 0.5, src2, 0.5, 0)
+dst2 = cv2.addWeighted(src3, 0.5, src4, 0.5, 0)
+dst3 = cv2.addWeighted(dst1, 0.5, dst2, 0.5, 0)
+dst4 = cv2.addWeighted(dst3, 0.5, src5, 0.5, 0)
+
+cv2.imwrite('mixed image.jpg', dst4)
+
+import cv2
+import numpy as np
+
+image = cv2.imread('/content/drive/My Drive/magisterka/train/normal/01_h.jpg') 
+
+image = cv2.resize(image, (224, 224)) 
+
+h = image.shape[0]
+w = image.shape[1]
+
+for y in range(0, h):
+    for x in range(0, w):
+        if (image[y,x]==[0,0,0]).all():
+          r = np.random.randint(low = 0, high = 255)
+          g = np.random.randint(low = 0, high = 255)
+          b = np.random.randint(low = 0, high = 255)
+          image[y, x] = (r, g, b)
+
+cv2.imwrite('output.jpg', image)
+
 import os
 
-phase = 'train'
+phase = 'val'
  
 glaucoma_dir = '/content/drive/My Drive/magisterka/' + phase + '/glaucoma'
 glaucoma_len= len([name for name in os.listdir(glaucoma_dir) if os.path.isfile(os.path.join(glaucoma_dir, name))])
@@ -412,14 +466,15 @@ train_dataset = torch.utils.data.DataLoader(
         image_dataset, shuffle=False, num_workers=8
     )
 
-first_component.eval()
+model_c2.eval()
 y_pred = []
 
 for data, target in train_dataset:
-  out = first_component(data)
+  data = data.to(device)
+  out = model_c2(data)
   _, preds_s = torch.max(out, 1)
   
-  disease_class = preds_s.numpy()[0]
+  disease_class = preds_s.cpu().numpy()[0]
   y_pred.append(get_label_for_class(disease_class))
 
 
@@ -579,10 +634,12 @@ def deprocess_image(img):
     img = np.clip(img, 0, 1)
     return np.uint8(img*255)
 
+#image_path = '/content/drive/My Drive/magisterka/val/glaucoma/glaucomaimage40prime_flip.jpg'
+#image_path = '/content/drive/My Drive/magisterka/val/amd/aria_d_17_12.tif'
+#image_path = '/content/drive/My Drive/magisterka/val/diabetic retinopathy/IDRiD_413_flip.jpg'
+image_path = '/content/drive/My Drive/magisterka/val/normal/im0253.jpg'
 
-image_path = '/content/drive/My Drive/magisterka/val/diabetic retinopathy/IDRiD_413_flip.jpg'
-
-grad_cam = GradCam(model=first_component, feature_module=first_component.layer4, target_layer_names=["2"], use_cuda=False)
+grad_cam = GradCam(model=model_c2, feature_module=model_c2.layer4, target_layer_names=["2"], use_cuda=True)
 
 img = cv2.imread(image_path)
 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

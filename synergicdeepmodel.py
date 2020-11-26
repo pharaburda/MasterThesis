@@ -27,11 +27,13 @@ import time
 import re
 import numpy as np
 import matplotlib.pyplot as plt
-from efficientnet_pytorch import EfficientNet
+import cv2
+#from efficientnet_pytorch import EfficientNet
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-num_classes = 3
+num_classes = 4
 batch_size = 8
+data_dir = '/content/drive/My Drive/small dataset/'
 
 class SynergicNet(nn.Module):
     def __init__(self):
@@ -99,6 +101,12 @@ def load_checkpoint(model_c1, model_c2, model_cs, optimizer_c1, optimizer_c2,
     optimizer_cs.load_state_dict(checkpoint['optimizer_S_state_dict'])
 
     return epoch
+
+def load_checkpoint_models(model_c1, model_c2):
+    path = "drive/My Drive/checkpoint.pt"
+    checkpoint = torch.load(path)
+    model_c1.load_state_dict(checkpoint['first_component_state_dict'])
+    model_c2.load_state_dict(checkpoint['second_component_state_dict'])
 
 def train_model(device, model_c1, model_c2, model_cs, dataloader_c1, dataloader_c2, 
                 optimizer_c1, optimizer_c2, optimizer_cs,
@@ -244,20 +252,34 @@ class RandomMask(object):
                 image.putpixel((y, x),(r, g, b))
       return image
 
+class CLAHEHistogramEqualization(object):
+  def __call__(self, image):
+    image = np.array(image)
+    image = np.uint8(image)
 
-data_dir = '/content/drive/My Drive/bigdataset'
-#class_count = {"train": 472, "val": 64}
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    lab_planes = cv2.split(lab)
+    clahe = cv2.createCLAHE()
+    lab_planes[0] = clahe.apply(lab_planes[0])
+    lab = cv2.merge(lab_planes)
+    bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    image = Image.fromarray(bgr)
+    return image
+
+from torchvision.utils import save_image
+
 input_size = (224, 224)
 transform = transforms.Compose([
         transforms.Resize(input_size),
         RandomMask(),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5,0.5,0.5],[0.5,0.5,0.5])
+        CLAHEHistogramEqualization(),
+        transforms.ToTensor()
     ])
 
 image_dataset = {x: datasets.ImageFolder(os.path.join(data_dir, x), transform) for x in ['train', 'val']}
-#print(image_dataset['train'][0][0])
-#image_dataset['train'][0][0].save('image.jpg')
+#print(image_dataset['train'][0][0].shape)
+#save_image(image_dataset['train'][0][0], 'image2.jpg')
 
 imageloader_c1 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, batch_size=batch_size, num_workers=8) for x in ['train', 'val']}
 imageloader_c2 = {x: torch.utils.data.DataLoader(image_dataset[x], shuffle=True, batch_size=batch_size, num_workers=8) for x in ['train', 'val']}
@@ -285,7 +307,7 @@ synergic_criterion = nn.CrossEntropyLoss()
 
 output = train_model(device, model_c1, model_c2, model_cs, imageloader_c1, imageloader_c2,
                      optimizer1,optimizer2,optimizerS, criterion_c1, criterion_c2,
-                     synergic_criterion, num_epochs = 5, use_checkpoint = False)
+                     synergic_criterion, num_epochs = 2, use_checkpoint = False)
 
 print(*list(model_c2.children()))
 
@@ -350,13 +372,13 @@ def make_dot(var, params=None):
 
 make_dot(output).view()
 
-data_dir = '/content/drive/My Drive/bigdataset/val'
-output_dir = data_dir + '/normal/'
-NORMAL = 2
-GLAUCOMA = 1
-#AMD = 0
-DR = 0
-#TEMP = 3
+modify_dir = '/content/drive/My Drive/small dataset/test'
+output_dir = modify_dir + '/normal/'
+NORMAL = 3
+#GLAUCOMA = 1
+AMD = 0
+DR = 2
+CATARACT = 1
 flip_suffix = '_flip.jpg'
 rotated_suffix = '_rotated.jpg'
 
@@ -390,7 +412,7 @@ normalizeTransform = transforms.Compose([
     ])
 
 def save_transformed_image():
-    image_dataset = datasets.ImageFolder(os.path.join(data_dir), rotationTransform)
+    image_dataset = datasets.ImageFolder(os.path.join(modify_dir), rotationTransform)
     for file_path, file_class in image_dataset.imgs:
       #print(file_path, file_class)
         if file_class == NORMAL:
@@ -400,89 +422,125 @@ def save_transformed_image():
             idx = image_dataset.imgs.index((file_path, file_class))
             save_image(image_dataset[idx][0], output_dir + file_name + rotated_suffix)
 
-save_transformed_image()
-#image_dataset = datasets.ImageFolder(os.path.join(data_dir), flipTransform)
+#save_transformed_image()
 
-import cv2
+def torch_equalize(image):
+    """Implements Equalize function from PIL using PyTorch ops based on:
+    https://github.com/tensorflow/tpu/blob/master/models/official/efficientnet/autoaugment.py#L352"""
+    def scale_channel(im, c):
+        
+        """Scale the data in the channel to implement equalize."""
+        im = im[:, :, c].float()
+        #print(im)
+        # Compute the histogram of the image channel.
+        histo = torch.histc(im, bins=256, min=0, max=255)#.type(torch.int32)
+        # For the purposes of computing the step, filter out the nonzeros.
+        nonzero_histo = torch.reshape(histo[histo != 0], [-1])
+        step = (torch.sum(nonzero_histo) - nonzero_histo[-1]) // 255
+        def build_lut(histo, step):
+            # Compute the cumulative sum, shifting by step // 2
+            # and then normalization by step.
+            lut = (torch.cumsum(histo, 0) + (step // 2)) // step
+            # Shift lut, prepending with 0.
+            lut = torch.cat([torch.zeros(1), lut[:-1]]) 
+            # Clip the counts to be in range.  This is done
+            # in the C code for image.point.
+            return torch.clamp(lut, 0, 255)
 
-src1 = cv2.imread('/content/drive/My Drive/random images/random image 1.jpg')
-src2 = cv2.imread('/content/drive/My Drive/random images/random image 2.jpg')
-src3 = cv2.imread('/content/drive/My Drive/random images/random image 3.jpg')
-src4 = cv2.imread('/content/drive/My Drive/random images/random image 4.jpg')
-src5 = cv2.imread('/content/drive/My Drive/random images/random image.jpeg')
+        # If step is zero, return the original image.  Otherwise, build
+        # lut from the full histogram and step and then index from it.
+        if step == 0:
+            result = im
+        else:
+            # can't index using 2d index. Have to flatten and then reshape
+            result = torch.gather(build_lut(histo, step), 0, im.flatten().long())
+            result = result.reshape_as(im)
+        
+        return result.type(torch.uint8)
 
-src1 = cv2.resize(src1, (224,224))
-src2 = cv2.resize(src2, (224,224))
-src3 = cv2.resize(src3, (224,224))
-src4 = cv2.resize(src4, (224,224))
-src5 = cv2.resize(src5, (224,224))
+    # Assumes RGB for now.  Scales each channel independently
+    # and then stacks the result.
+    print(image.shape)
+    s1 = scale_channel(image, 0)
+    s2 = scale_channel(image, 1)
+    s3 = scale_channel(image, 2)
+    image = torch.stack([s1, s2, s3], 2)
+    return image
 
-dst1 = cv2.addWeighted(src1, 0.5, src2, 0.5, 0)
-dst2 = cv2.addWeighted(src3, 0.5, src4, 0.5, 0)
-dst3 = cv2.addWeighted(dst1, 0.5, dst2, 0.5, 0)
-dst4 = cv2.addWeighted(dst3, 0.5, src5, 0.5, 0)
+amd_path = '/content/drive/My Drive/small dataset/val/amd/464_left.jpg'
+# # cataract_path = '/content/drive/My Drive/temp/cataract/Kopia cataract_066.png'
+# # dr_path = '/content/drive/My Drive/temp/dr/Kopia 4131_right.jpg'
+# # normal_path = '/content/drive/My Drive/temp/normal/Kopia 2330_right.jpg'
+# # normal_1_path = '/content/drive/My Drive/temp/normal/Kopia 1_right.jpg'
+img = cv2.imread(amd_path)
+equalized_img = torch_equalize(torch.from_numpy(img))
+img = equalized_img.numpy()
+cv2.imwrite('amd 464_left equalized.png', img)
 
-cv2.imwrite('mixed image.jpg', dst4)
+amd_path = '/content/drive/My Drive/small dataset/val/amd/464_left.jpg'
+bgr = cv2.imread(amd_path)
 
-import cv2
-import numpy as np
+lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
 
-image = cv2.imread('/content/drive/My Drive/magisterka/train/normal/01_h.jpg') 
+lab_planes = cv2.split(lab)
 
-image = cv2.resize(image, (224, 224)) 
+clahe = cv2.createCLAHE()
 
-h = image.shape[0]
-w = image.shape[1]
+lab_planes[0] = clahe.apply(lab_planes[0])
 
-for y in range(0, h):
-    for x in range(0, w):
-        if (image[y,x]==[0,0,0]).all():
-          r = np.random.randint(low = 0, high = 255)
-          g = np.random.randint(low = 0, high = 255)
-          b = np.random.randint(low = 0, high = 255)
-          image[y, x] = (r, g, b)
+lab = cv2.merge(lab_planes)
 
-cv2.imwrite('output.jpg', image)
+bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+cv2.imwrite('amd clahe.png', bgr)
 
 import os
 
-phase = 'val'
+phase = 'test'
  
-glaucoma_dir = '/content/drive/My Drive/bigdataset/' + phase + '/glaucoma'
-glaucoma_len= len([name for name in os.listdir(glaucoma_dir) if os.path.isfile(os.path.join(glaucoma_dir, name))])
-glaucoma_list = ['glaucoma'] * glaucoma_len
-print(glaucoma_len) 
+# glaucoma_dir = data_dir + phase + '/glaucoma'
+# glaucoma_len= len([name for name in os.listdir(glaucoma_dir) if os.path.isfile(os.path.join(glaucoma_dir, name))])
+# glaucoma_list = ['glaucoma'] * glaucoma_len
+# print(glaucoma_len) 
 
-retinopathy_dir = '/content/drive/My Drive/bigdataset/' + phase + '/diabetic retinopathy'
+retinopathy_dir = data_dir + phase + '/dr'
 retinopathy_len= len([name for name in os.listdir(retinopathy_dir) if os.path.isfile(os.path.join(retinopathy_dir, name))])
 retinopathy_list = ['dr'] * retinopathy_len
 print(retinopathy_len) 
 
-# amd_dir = '/content/drive/My Drive/bigdataset/' + phase + '/amd'
-# amd_len= len([name for name in os.listdir(amd_dir) if os.path.isfile(os.path.join(amd_dir, name))])
-# amd_list = ['amd'] * amd_len
-# print(amd_len) 
+amd_dir = data_dir + phase + '/amd'
+amd_len= len([name for name in os.listdir(amd_dir) if os.path.isfile(os.path.join(amd_dir, name))])
+amd_list = ['amd'] * amd_len
+print(amd_len) 
 
-normal_dir = '/content/drive/My Drive/bigdataset/' + phase + '/normal'
+normal_dir = data_dir + phase + '/normal'
 normal_len= len([name for name in os.listdir(normal_dir) if os.path.isfile(os.path.join(normal_dir, name))])
 normal_list = ['normal'] * normal_len
-print(normal_len)
+print(normal_len) 
+
+cataract_dir = data_dir + phase + '/cataract'
+cataract_len= len([name for name in os.listdir(cataract_dir) if os.path.isfile(os.path.join(cataract_dir, name))])
+cataract_list = ['cataract'] * cataract_len
+print(cataract_len)
 
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 
-data_dir = '/content/drive/My Drive/bigdataset'
+# model_c1, model_c2, model_cs = initialize_model(device)
+# model_c1 = model_c1.to(device)
+# model_c2 = model_c2.to(device)
+# load_checkpoint_models(model_c1, model_c2)
 
 def get_label_for_class(disease_class):
    return {
-       # 0: 'amd',
-        0: 'dr',
-        1: 'glaucoma',
-        2: 'normal'
+        0: 'amd',
+        1: 'cataract',
+        2: 'dr',
+        #1: 'glaucoma',
+        3: 'normal'
     }[disease_class]
 
 #y_test = np.concatenate([amd_list, retinopathy_list, glaucoma_list, normal_list])
-y_test = np.concatenate([retinopathy_list, glaucoma_list, normal_list])
+y_test = np.concatenate([amd_list, cataract_list, retinopathy_list, normal_list])
 
 image_dataset = datasets.ImageFolder(os.path.join(data_dir, 'val'), transform)
 
@@ -490,22 +548,35 @@ train_dataset = torch.utils.data.DataLoader(
         image_dataset, shuffle=False, num_workers=8
     )
 
-model_c1.eval()
+model_c2.eval()
 y_pred = []
+pred_outputs = []
 
-for data, target in train_dataset:
-  data = data.to(device)
-  out = model_c1(data)
-  _, preds_s = torch.max(out, 1)
+for i, (image, label) in enumerate(train_dataset, 0):
+    image = image.to(device)
+    outputs = model_c2(image)
+    _, predicted = torch.max(outputs.data, 1)
+    
+    disease_class = predicted.cpu().numpy()[0]
+    label_name = get_label_for_class(disease_class)
+    y_pred.append(label_name)
+
+    sample_fname, _ = train_dataset.dataset.samples[i]
+    if disease_class != label and label == 0:
+      pred_outputs.append(sample_fname + ' ' + label_name)
+
+# for data, target in train_dataset:
+#   data = data.to(device)
+#   out = model_c1(data)
+#   _, preds_s = torch.max(out, 1)
   
-  disease_class = preds_s.cpu().numpy()[0]
-  y_pred.append(get_label_for_class(disease_class))
+#   disease_class = preds_s.cpu().numpy()[0]
+#   y_pred.append(get_label_for_class(disease_class))
 
 
 print(classification_report(y_pred, y_test))
-
 #labels = ['amd', 'dr', 'glaucoma', 'normal']
-labels = ['dr', 'glaucoma', 'normal']
+labels = ['amd', 'cataract', 'dr', 'normal']
 matrix = confusion_matrix(y_test, y_pred)
 print(matrix)
 
@@ -517,6 +588,8 @@ ax.set_ylabel('True')
 ax.xaxis.set_ticklabels(labels)
 ax.yaxis.set_ticklabels(labels)
 plt.savefig('confusion matrix')
+
+#print(pred_outputs)
 
 import cv2
 import numpy as np
